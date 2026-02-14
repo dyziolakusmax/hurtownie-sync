@@ -11,68 +11,53 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Run synchronizers with smart operator gaps
+      - name: Run sync (parallel singles, AB spaced)
         shell: bash
         run: |
           set -euo pipefail
 
-          # --- USTAWIENIA ODSTĘPÓW ---
-          MIN_GAP_AB=900      # 15 minut dla AB
-          MIN_GAP_OTHER=30    # 30 sekund dla pozostałych (możesz zmienić na 0)
+          # --- USTAWIENIA ---
+          GAP_AB=900          # 15 minut między STARTAMI AB
+          CURL_MAX=7200       # max 2h na jeden request
 
-          # --- KOLEJNOŚĆ SYNCHRONIZATORÓW ---
-          IDS=(2 3 4 8 9 17 15)
-
-          # --- MAPOWANIE ID -> OPERATOR ---
-          operator_for_id() {
-            case "$1" in
-              8|15|17) echo "AB" ;;
-              4|9)     echo "ACTION" ;;
-              2)       echo "NTT" ;;
-              3)       echo "INCOM" ;;
-              *)       echo "OTHER" ;;
-            esac
+          run_one() {
+            local name="$1"
+            local url="$2"
+            echo "--------------------------------------"
+            echo "START [$name] $url"
+            echo "TIME  $(date -u) UTC"
+            # Jeśli endpoint nie wypisuje nic sensownego, możesz dodać | head -c 2000
+            /usr/bin/curl -L --fail --max-time "$CURL_MAX" -sS "$url" || true
+            echo "END   [$name] $url"
+            echo "TIME  $(date -u) UTC"
           }
-
-          # Zapamiętujemy czas startu operatorów
-          declare -A last_start_ts
 
           echo "===== START SYNC $(date -u) UTC ====="
 
-          for id in "${IDS[@]}"; do
+          # --- POJEDYNCZE (odpalamy równolegle) ---
+          run_one "NTT (id=2)"   "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=2" & pid_ntt=$!
+          run_one "INCOM (id=3)" "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=3" & pid_incom=$!
 
-            op="$(operator_for_id "$id")"
-            url="https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=${id}"
+          # --- ACTION (2 sztuki: sekwencyjnie, ale niezależnie od AB) ---
+          (
+            run_one "ACTION (id=4)" "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=4"
+            run_one "ACTION (id=9)" "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=9"
+          ) & pid_action=$!
 
-            now=$(date +%s)
+          # --- AB (blokujący): starty co 15 minut ---
+          (
+            run_one "AB (id=8)"  "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=8"
+            echo "Waiting ${GAP_AB}s before next AB..."
+            sleep "$GAP_AB"
+            run_one "AB (id=15)" "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=15"
+            echo "Waiting ${GAP_AB}s before next AB..."
+            sleep "$GAP_AB"
+            run_one "AB (id=17)" "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=17"
+          ) & pid_ab=$!
 
-            # wybierz minimalny odstęp
-            if [[ "$op" == "AB" ]]; then
-              min_gap=$MIN_GAP_AB
-            else
-              min_gap=$MIN_GAP_OTHER
-            fi
+          echo "===== Launched: NTT=$pid_ntt INCOM=$pid_incom ACTION=$pid_action AB=$pid_ab ====="
+          echo "Waiting for all to finish..."
 
-            # sprawdź czy trzeba czekać
-            if [[ -n "${last_start_ts[$op]+x}" ]]; then
-              elapsed=$(( now - last_start_ts[$op] ))
-              if (( elapsed < min_gap )); then
-                wait=$(( min_gap - elapsed ))
-                echo "Waiting ${wait}s (operator=$op)..."
-                sleep "$wait"
-              fi
-            fi
+          wait "$pid_ntt" "$pid_incom" "$pid_action" "$pid_ab"
 
-            # zapisz start operatora
-            last_start_ts[$op]=$(date +%s)
-
-            echo "--------------------------------------"
-            echo "START: $url"
-            echo "TIME:  $(date -u) UTC (operator=$op)"
-
-            curl -L --fail --max-time 7200 -sS "$url" || true
-
-            echo "END:   $url"
-          done
-
-          echo "===== END SYNC ====="
+          echo "===== END SYNC $(date -u) UTC ====="
