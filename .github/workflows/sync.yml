@@ -2,7 +2,7 @@ name: Hurtownie Sync
 
 on:
   schedule:
-    - cron: "0 2 * * *"   # 02:00 UTC = 03:00 PL (zimą)
+    - cron: "0 2 * * *"   # 02:00 UTC = 03:00 PL zimą
   workflow_dispatch:
 
 jobs:
@@ -11,38 +11,52 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Run synchronizers sequentially with 15 min break
+      - name: Run sync (parallel singles, AB spaced)
         shell: bash
         run: |
           set -euo pipefail
 
-          URLS=(
-            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=2"
-            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=3"
-            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=4"
-            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=8"
-            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=9"
-            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=17"
-            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=15"
-          )
+          # --- USTAWIENIA ---
+          GAP_AB=900          # 15 minut między STARTAMI AB
+          CURL_MAX=7200       # max 2h na jeden request
+
+          run_one() {
+            local name="$1"
+            local url="$2"
+            echo "--------------------------------------"
+            echo "START [$name] $url"
+            echo "TIME  $(date -u) UTC"
+            /usr/bin/curl -L --fail --max-time "$CURL_MAX" -sS "$url" || true
+            echo "END   [$name] $url"
+            echo "TIME  $(date -u) UTC"
+          }
 
           echo "===== START SYNC $(date -u) UTC ====="
 
-          for i in "${!URLS[@]}"; do
-            url="${URLS[$i]}"
-            echo "--------------------------------------"
-            echo "START: $url"
-            echo "TIME: $(date -u) UTC"
+          # --- POJEDYNCZE (odpalamy równolegle) ---
+          run_one "NTT (id=2)"   "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=2" & pid_ntt=$!
+          run_one "INCOM (id=3)" "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=3" & pid_incom=$!
 
-            curl -L --fail --max-time 7200 -sS "$url" || true
+          # --- ACTION (sekwencyjnie, ale niezależnie od AB) ---
+          (
+            run_one "ACTION (id=4)" "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=4"
+            run_one "ACTION (id=9)" "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=9"
+          ) & pid_action=$!
 
-            echo "END: $url"
-            echo "TIME: $(date -u) UTC"
+          # --- AB (blokujący): starty co 15 minut ---
+          (
+            run_one "AB (id=8)"  "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=8"
+            echo "Waiting ${GAP_AB}s before next AB..."
+            sleep "$GAP_AB"
+            run_one "AB (id=15)" "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=15"
+            echo "Waiting ${GAP_AB}s before next AB..."
+            sleep "$GAP_AB"
+            run_one "AB (id=17)" "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=17"
+          ) & pid_ab=$!
 
-            if [ "$i" -lt "$((${#URLS[@]} - 1))" ]; then
-              echo "Waiting 15 minutes..."
-              sleep 900
-            fi
-          done
+          echo "===== Launched: NTT=$pid_ntt INCOM=$pid_incom ACTION=$pid_action AB=$pid_ab ====="
+          echo "Waiting for all to finish..."
 
-          echo "===== END SYNC ====="
+          wait "$pid_ntt" "$pid_incom" "$pid_action" "$pid_ab"
+
+          echo "===== END SYNC $(date -u) UTC ====="
