@@ -1,0 +1,48 @@
+name: Hurtownie Sync
+
+on:
+  schedule:
+    - cron: "0 2 * * *"   # 02:00 UTC = 03:00 PL (zimą)
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Run synchronizers sequentially with 15 min break
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          URLS=(
+            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=2"
+            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=3"
+            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=4"
+            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=8"
+            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=9"
+            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=17"
+            "https://www.pit-computers.pl/cron/productSynchronizer.php?synchronizer_id=15"
+          )
+
+          echo "===== START SYNC $(date -u) UTC ====="
+
+          for i in "${!URLS[@]}"; do
+            url="${URLS[$i]}"
+            echo "--------------------------------------"
+            echo "START: $url"
+            echo "TIME: $(date -u) UTC"
+
+            curl -L --fail --max-time 7200 -sS "$url" || true
+
+            echo "END: $url"
+            echo "TIME: $(date -u) UTC"
+
+            if [ "$i" -lt "$((${#URLS[@]} - 1))" ]; then
+              echo "Waiting 15 minutes..."
+              sleep 900
+            fi
+          done
+
+          echo "===== END SYNC ====="
